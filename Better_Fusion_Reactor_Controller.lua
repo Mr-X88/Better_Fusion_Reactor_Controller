@@ -1,5 +1,5 @@
 -- ============================================================
--- BETTER FUSION REACTOR CONTROLLER v3.00 (New Efficiency Formula)
+-- BETTER FUSION REACTOR CONTROLLER v3.10 (New Efficiency Formula)
 -- Changes in this version:
 --   * Replaced old step formula with the inverted exact Efficiency formula:
 --     Efficiency = min(100, max(0, 22 / ((|TR - CR| / 100) + 0.2) - 10))
