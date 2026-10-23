@@ -1,4 +1,4 @@
-local SCRIPT_VERSION = "v3.45"
+local SCRIPT_VERSION = "v3.46"
 
 local reactor = nil
 local monitor = nil
@@ -578,24 +578,24 @@ local function backgroundSensorLoop()
                     waitingForIdleJump = false
                     directionProbePending = true
                     directionKnown = false
-                    stuckReason = "Idle exited below threshold: direction test +/-2"
+                    stuckReason = "Idle exited below threshold Wayfinding two-step"
                 end
             elseif observedJump and pendingAction == nil and running and eff > 0 and eff < 95.0 then
                 if directionKnown then
                     directionProbePending = false
                     if eff > previousSensorEfficiency then
-                        stuckReason = "Corrects the eff to 100: direction confirmed from sensor"
+                        stuckReason = "Corrects the eff to 100 direction confirmed from sensor"
                     elseif eff < previousSensorEfficiency then
                         controlDirection = -controlDirection
-                        stuckReason = "Corrects It went wrong : direction reversed from sensor"
+                        stuckReason = "Corrects It went wrong  direction reversed from sensor"
                     else
                         directionProbePending = true
                         directionKnown = false
-                        stuckReason = "Jump ambiguous: direction test +/-2"
+                        stuckReason = "TR JUMP ambiguous start Wayfinding two-step"
                     end
                 else
                     directionProbePending = true
-                    stuckReason = "Jump: direction unknown, test +/-2"
+                    stuckReason = "TR JUMP start Wayfinding two-step"
                 end
             end
 
