@@ -28,20 +28,7 @@ Ctrl  Run
 How the Better Fusion Reactor for Mekanism Calculates Its Efficiency.
 <img width="536" height="109" alt="grafik" src="https://github.com/user-attachments/assets/79803fbd-4b55-4cc7-bac7-872f2ce09b48" />
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-And this is what the rearranged formula looks like
+And this is what the rearranged formula looks like.
 <img width="597" height="192" alt="grafik" src="https://github.com/user-attachments/assets/a63c645d-d41a-4f93-a902-01876899c659" />
 
 
