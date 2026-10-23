@@ -32,6 +32,7 @@ How the Better Fusion Reactor for Mekanism Calculates Its Efficiency.
 <img width="597" height="192" alt="grafik" style="display: block; margin-bottom: 25px;" src="https://github.com/user-attachments/assets/a63c645d-d41a-4f93-a902-01876899c659" />
 
 <p>And that is what the Advanced Computer calculates.</p>
-EF = min(100, max(0, 22 / ((|TR - CR| / 100) + 0.2) - 10))
-Here, |TR - CR| represents the absolute value of the difference between the reactivity values.
+<p></p>
+<p>EF = min(100, max(0, 22 / ((|TR - CR| / 100) + 0.2) - 10))</p>
+<p>Here, |TR - CR| represents the absolute value of the difference between the reactivity values.</p>
 
