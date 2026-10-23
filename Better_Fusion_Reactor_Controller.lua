@@ -1,4 +1,4 @@
-local SCRIPT_VERSION = "v3.44"
+local SCRIPT_VERSION = "v3.45"
 
 local reactor = nil
 local monitor = nil
@@ -674,11 +674,11 @@ local function backgroundSensorLoop()
             if not running or eff == 0 then
                 stuckReason = (hasEverRun and eff == 0) and "CRASH detected!" or "Standby"
             elseif directionProbePending then
-                stuckReason = directionKnown and "Jump: test step +/-2 pending" or "Direction unclear: test +/-2 pending"
+                stuckReason = directionKnown and "TR JUMP Wayfinding two-step pending " or "Direction unclear Wayfinding two-step pending"
             elseif waitingForIdleJump then
-                stuckReason = "Idle: waiting for jump"
+                stuckReason = "Idle waiting for TR JUMP"
             elseif eff >= 95.0 then
-                stuckReason = "Idle: waiting for jump"
+                stuckReason = "Idle waiting for TR JUMP"
             else
                 if lastSensorEF ~= nil then
                     local delta = eff - lastSensorEF
@@ -828,9 +828,9 @@ local function executionLoop()
                 elseif directionProbePending then
                     stuckReason = "Direction test +/-2 pending"
                 elseif waitingForIdleJump then
-                    stuckReason = "Idle waiting for jump"
+                    stuckReason = "Idle waiting for TR JUMP"
                 elseif currentEfficiency >= 95.0 then
-                    stuckReason = "Idle waiting for jump"
+                    stuckReason = "Idle waiting for TR JUMP"
                 elseif not liveIsRunning or currentEfficiency == 0 then
                     stuckReason = "No control standby"
                 end
