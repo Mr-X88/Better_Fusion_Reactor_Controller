@@ -36,6 +36,11 @@ How the Better Fusion Reactor for Mekanism Calculates Its Efficiency.
 
 
 
+
+
+
+
+
 And this is what the rearranged formula looks like
 <img width="597" height="192" alt="grafik" src="https://github.com/user-attachments/assets/a63c645d-d41a-4f93-a902-01876899c659" />
 
