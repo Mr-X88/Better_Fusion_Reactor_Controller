@@ -1,22 +1,10 @@
--- ============================================================
--- BETTER FUSION REACTOR CONTROLLER v3.22
--- v3.22: Monitor rows are redrawn only when their displayed inputs change.
---         Preserves the 0.25s UI check while avoiding repeat formatting and terminal writes.
--- v3.21: Defaults monitor logs to OFF and gates monitor/log work on a connected monitor.
--- Changes in v3.18:
---   * Removes unused calculation helper and dead state/log fields.
---   * Inlines immutable settings except SCRIPT_VERSION and ENABLE_MONITOR_LOGS.
---   * Retains the one-time fixed relay-side list; removes redundant local state.
---   * Keeps control decisions, sensor timing, stability checks, and log behavior unchanged.
--- Preserves v3.17 cycle-end EF/ER snapshot behavior and Jump diagnostic labels.
--- v3.20 pairs TR JUMP Wayfinding only with the immediately adjacent rendered Jump (+) row.
--- ============================================================
-local SCRIPT_VERSION = "v3.22"
+local SCRIPT_VERSION = "v3.44"
 
 local reactor = nil
 local monitor = nil
 local monitorName = nil
 local relay = nil
+local monitorWidth = 8
 local monitorHeight = 25
 local sides = {"top", "bottom", "left", "right", "front", "back"}
 
@@ -46,8 +34,6 @@ local stableExecutionEfficiency = nil
 local lastExecutionTime = -3.0
 local pendingAction = nil           -- Exactly one action waiting for re-evaluation
 local deferredCycleLog = nil        -- Previous completed action; emitted on the next action's follow-up reading
-local lastEmittedLogDiag = nil       -- Diagnostic of the row currently directly below the next inserted row
-local lastEmittedLogStartEF = nil     -- Start EF of that row, used only for exact TR/Jump log pairing
 -- Settled EF/ER snapshot. Refreshed only after the existing EF stability check succeeds.
 -- Kept until the next idle jump so the deferred log can report the pre-jump cycle end.
 local idleCycleEF = nil
@@ -83,6 +69,13 @@ local fullRedraw = true
 local liveEF = 0
 local liveER = 0
 local liveCaseTemp = 0
+-- Monitor-only throttled samples for UI display.
+local monitorCaseTemp = 0
+local lastCaseTempMonitorUpdate = nil
+local monitorEF = 0
+local monitorER = 0
+local lastEffErMonitorUpdate = nil
+
 local liveIsRunning = false
 local liveDataValid = false
 local invalidReadCount = 0
@@ -134,9 +127,12 @@ local function scanPeripherals()
                 monitor = wrapped
                 monitorName = name
                 pcall(function() monitor.setTextScale(0.5) end)
-                local okSize, _, height = pcall(function() return monitor.getSize() end)
-                if okSize and type(height) == "number" then monitorHeight = height end
-                print(" -> Color Monitor: " .. name .. " (H=" .. monitorHeight .. ")")
+                local okSize, width, height = pcall(function() return monitor.getSize() end)
+                if okSize then
+                    if type(width) == "number" then monitorWidth = width end
+                    if type(height) == "number" then monitorHeight = height end
+                end
+                print(" -> Color Monitor: " .. name .. " (WxH=" .. monitorWidth .. "x" .. monitorHeight .. ")")
             end
         elseif wrapped and (
             typeMatches(pType, "redstoneIntegrator") or
@@ -154,8 +150,6 @@ local function scanPeripherals()
     print("------------------------")
 end
 
--- A wrapped monitor can remain as a stale Lua object after it is unplugged.
--- Check presence before doing monitor-only work or attempting to render.
 local function monitorConnected()
     return monitor ~= nil and monitorName ~= nil and peripheral.isPresent(monitorName)
 end
@@ -249,7 +243,6 @@ local function getReactorData()
         return logicMode, liveCaseTemp, liveEF, liveER, liveIsRunning, false
     end
 
-    -- High-precision rounding to 3 decimal places for EF
     efficiency = roundToThree(efficiency)
 
     local dataValid = tempOK and effOK and errOK
@@ -275,8 +268,6 @@ local function getReactorData()
 end
 
 -- ==================== CALCULATE CONTROL STEP ====================
--- Inverted formula: Solves for DeltaR given current Efficiency (currentEff -> 100% target)
--- DeltaR = 100 * (22 / (EF + 10) - 0.2)
 local function calculateStep(currentEff)
     currentEff = math.min(100, math.max(0, currentEff))
     local requiredDelta = 100 * ((22 / (currentEff + 10)) - 0.2)
@@ -318,12 +309,9 @@ local function applyControlAction(direction, strength, separateNudge, nudgeInclu
     return false, "Reactor API unavailable / adjustReactivity failed", false, nil
 end
 
--- Emit the previous action's log using the current cycle's follow-up EF/ER.
--- This intentionally shifts visible log output by one completed action.
 local function emitDeferredCycleLog(entry, measuredEfficiency, measuredError)
     if not entry or not monitorLogsEnabled() then return end
 
-    -- For an idle-jump cycle, use the settled EF/ER captured before the jump.
     if entry.cycleEndEfficiency ~= nil then
         measuredEfficiency = entry.cycleEndEfficiency
         if entry.cycleEndError ~= nil then measuredError = entry.cycleEndError end
@@ -335,41 +323,31 @@ local function emitDeferredCycleLog(entry, measuredEfficiency, measuredError)
     if entry.usedNudge then
         displayDiag = "Nudge"
     elseif math.abs(displayDelta) >= 16.0 then
-        displayDiag = (displayDelta > 0) and "Jump (+)" or "Jump (-)"
+        displayDiag = (displayDelta > 0) and "Move right direction" or "Move wrong direction"
     elseif entry.isProbe then
-        displayDiag = (displayDelta == 0) and "Test?" or "TR JUMP Wayfinding"
+        displayDiag = (displayDelta == 0) and "Runs into a wall (100 or 0) or the effect is not being read correctly " or "TR JUMP Wayfinding"
     elseif displayDelta > 0 then
-        displayDiag = "+"
+        displayDiag = "Move uncertain direction"
     elseif displayDelta < 0 then
-        displayDiag = "Falling"
+        displayDiag = "Move Without checking the direction"
     else
-        displayDiag = "Stable"
+        displayDiag = "Runs into a wall (100 or 0) or the effect is not being read correctly"
     end
 
-    -- Logs are inserted at the top of logHistory. Therefore the previously
-    -- emitted row becomes the row directly below this new row. Pair a TR JUMP
-    -- Wayfinding row only with that immediately adjacent Jump (+) row; never
-    -- reuse a stale Jump value from several rows earlier.
-    -- This changes only the displayed second EF, not sensor/control values.
     local logEfficiency = measuredEfficiency
     if displayDiag == "TR JUMP Wayfinding"
-        and lastEmittedLogDiag == "Jump (+)"
-        and lastEmittedLogStartEF ~= nil then
-        logEfficiency = lastEmittedLogStartEF
+        and isFiniteNumber(entry.followingCycleStartEfficiency) then
+        logEfficiency = entry.followingCycleStartEfficiency
     end
 
     local compactLog = string.format(
-        "#%03d St:%s Eff:%.2f->%.2f%% Err:%.0f(%ds) %s",
-        entry.id, entry.stepText, entry.beforeEfficiency, logEfficiency,
-        measuredError, entry.cycleSeconds, string.sub(displayDiag, 1, 12)
+        "#%03d %ds %s eff:%.2f->%.2f%% Err:%.0f %s",
+        entry.id, entry.cycleSeconds, entry.stepText, entry.beforeEfficiency, logEfficiency,
+        measuredError, string.sub(displayDiag, 1, 16)
     )
     table.insert(logHistory, 1, compactLog)
 
-    -- Track only the row just inserted. Reset the EF for every other row so
-    -- an unrelated Jump (+) cannot be incorrectly reused later.
-    lastEmittedLogDiag = displayDiag
-    lastEmittedLogStartEF = (displayDiag == "Jump (+)") and entry.beforeEfficiency or nil
-    local maxLogLines = math.max(1, math.min(monitorHeight - 9, 18))
+    local maxLogLines = math.max(1, monitorHeight - 8)
     while #logHistory > maxLogLines do table.remove(logHistory) end
 end
 
@@ -408,7 +386,7 @@ local function finishPendingAction(postEfficiency, postError, logsAllowed)
             waitingForIdleJump = true
             directionProbePending = false
             directionKnown = false
-            stuckReason = "Idle >= 95.0%: waiting for jump"
+            stuckReason = "Idle: waiting for jump"
         elseif delta > 0 then
             controlDirection = action.direction
             directionProbePending = false
@@ -435,9 +413,6 @@ local function finishPendingAction(postEfficiency, postError, logsAllowed)
         end
     end
 
-    -- The displayed cycle log is one action behind by design:
-    -- emit the previously saved row with this current follow-up measurement,
-    -- then save this action for display when the next action has a follow-up reading.
     if action.monitorLogsEnabled and logsAllowed then
         if deferredCycleLog then
             emitDeferredCycleLog(deferredCycleLog, postEfficiency, postError)
@@ -452,8 +427,6 @@ local function finishPendingAction(postEfficiency, postError, logsAllowed)
         }
     else
         deferredCycleLog = nil
-        lastEmittedLogDiag = nil
-        lastEmittedLogStartEF = nil
     end
 
     pendingAction = nil
@@ -476,6 +449,9 @@ local function pulseListenerLoop()
             if hasMonitor then
                 lastDeltaT = deltaT
                 pulseCountTotal = pulseCountTotal + 1
+                if pulseCountTotal > 999 then
+                    pulseCountTotal = 1
+                end
             end
 
             local desiredMultiplier = lowPerfMultiplier
@@ -525,7 +501,7 @@ local function pulseListenerLoop()
                     pulseCountTotal, intervalText, lastDesiredMultiplier, lowPerfMultiplier
                 )
                 table.insert(pulseLogHistory, 1, pulseLine)
-                local maxPulseLines = math.max(1, math.min(monitorHeight - 7, 18))
+                local maxPulseLines = math.max(1, monitorHeight - 6)
                 while #pulseLogHistory > maxPulseLines do table.remove(pulseLogHistory) end
             end
         end
@@ -585,16 +561,10 @@ local function backgroundSensorLoop()
                 math.abs(eff - previousSensorEfficiency) >= 3.0
             local observedMovement = lastPollEF ~= nil and eff ~= lastPollEF
 
-            -- Any EF movement requires a fresh snapshot after the same existing
-            -- stability check succeeds. Do not attach the old snapshot here:
-            -- an ordinary step toward the peak is not the end-of-cycle jump.
             if observedMovement then
                 idleSnapshotRefreshPending = true
             end
 
-            -- A falling jump marks the end of the previously settled cycle.
-            -- Preserve its last stable snapshot without requiring EF >= 95%.
-            -- Rising jumps must not pin the older, lower value to this log row.
             if observedJump and previousSensorEfficiency ~= nil and eff < previousSensorEfficiency then
                 if idleCycleEF ~= nil and deferredCycleLog ~= nil and
                    deferredCycleLog.cycleEndEfficiency == nil then
@@ -614,10 +584,10 @@ local function backgroundSensorLoop()
                 if directionKnown then
                     directionProbePending = false
                     if eff > previousSensorEfficiency then
-                        stuckReason = "Jump (+): direction confirmed from sensor"
+                        stuckReason = "Corrects the eff to 100: direction confirmed from sensor"
                     elseif eff < previousSensorEfficiency then
                         controlDirection = -controlDirection
-                        stuckReason = "Jump (-): direction reversed from sensor"
+                        stuckReason = "Corrects It went wrong : direction reversed from sensor"
                     else
                         directionProbePending = true
                         directionKnown = false
@@ -668,8 +638,6 @@ local function backgroundSensorLoop()
                 secondCounter = 0
                 secondsSinceLastGo = 0
                 deferredCycleLog = nil
-                lastEmittedLogDiag = nil
-                lastEmittedLogStartEF = nil
             end
 
             if lastPollEF ~= nil and eff == lastPollEF then
@@ -679,8 +647,6 @@ local function backgroundSensorLoop()
                     stableExecutionEfficiency = eff
                     unchangedPollCount = 0
 
-                    -- Snapshot follows the existing unchanged-EF stability check;
-                    -- EF does not have to be >= 95.0 to be saved.
                     if idleCycleEF == nil or
                        idleSnapshotRefreshPending then
                         idleCycleEF = eff
@@ -710,18 +676,18 @@ local function backgroundSensorLoop()
             elseif directionProbePending then
                 stuckReason = directionKnown and "Jump: test step +/-2 pending" or "Direction unclear: test +/-2 pending"
             elseif waitingForIdleJump then
-                stuckReason = "Idle >= 95.0%: waiting for jump"
+                stuckReason = "Idle: waiting for jump"
             elseif eff >= 95.0 then
-                stuckReason = "Idle: EF >= 95.0%"
+                stuckReason = "Idle: waiting for jump"
             else
                 if lastSensorEF ~= nil then
                     local delta = eff - lastSensorEF
                     if math.abs(delta) >= 3.0 then
-                        stuckReason = (delta < 0) and "Sensor jump (-)" or "Sensor jump (+)"
+                        stuckReason = (delta < 0) and "Move wrong direction" or "Move right direction"
                     elseif delta > 0 then
-                        stuckReason = "+"
+                        stuckReason = "eff rising now"
                     elseif delta < 0 then
-                        stuckReason = "-"
+                        stuckReason = "eff falling now"
                     else
                         stuckReason = "Stalled"
                     end
@@ -762,7 +728,6 @@ end
 local function executionLoop()
     while true do
         local now = os.clock()
-        -- POINT A FIX: Strictly enforce 3.0 regardless of executionGo
         if executionGo and stableExecutionEfficiency ~= nil and
            stableExecutionEfficiency == liveEF and not pendingAction and
            now - lastExecutionTime >= 3.0 then
@@ -817,8 +782,16 @@ local function executionLoop()
                     local actionCycleSeconds = nil
                     if actionLogsEnabled then
                         logCounter = logCounter + 1
+                        if logCounter > 999 then
+                            logCounter = 1
+                        end
                         actionLogId = logCounter
                         actionCycleSeconds = secondsSinceLastGo
+
+                        if deferredCycleLog and
+                           deferredCycleLog.followingCycleStartEfficiency == nil then
+                            deferredCycleLog.followingCycleStartEfficiency = currentEfficiency
+                        end
                     end
 
                     pendingAction = {
@@ -855,11 +828,11 @@ local function executionLoop()
                 elseif directionProbePending then
                     stuckReason = "Direction test +/-2 pending"
                 elseif waitingForIdleJump then
-                    stuckReason = "Idle: waiting for jump"
+                    stuckReason = "Idle waiting for jump"
                 elseif currentEfficiency >= 95.0 then
-                    stuckReason = "Idle: EF >= 95.0%"
+                    stuckReason = "Idle waiting for jump"
                 elseif not liveIsRunning or currentEfficiency == 0 then
-                    stuckReason = "No control: standby"
+                    stuckReason = "No control standby"
                 end
             end
         end
@@ -890,10 +863,6 @@ local function clearLineAt(y)
     monitor.clearLine()
 end
 
--- Compares the values that determine a row's visible content. Formatting and
--- monitor API calls happen only when at least one of these values changes.
--- Painter functions are defined once (not created in the 0.25s loop) to avoid
--- per-refresh closure allocations.
 local function renderCachedLine(y, painter, painterArg, ...)
     local cached = renderedLines[y]
     local count = select("#", ...)
@@ -925,7 +894,7 @@ end
 local function drawPage1Header()
     monitor.setBackgroundColor(colors.blue)
     monitor.setTextColor(colors.white)
-    monitor.write(string.format("=== FUSION CONTROL %s (1/2) ===", SCRIPT_VERSION))
+    monitor.write(string.format("=== FUSION CONTROL %s %dx%d (1/2) ===", SCRIPT_VERSION, monitorWidth, monitorHeight))
     monitor.setBackgroundColor(colors.black)
     monitor.setTextColor(colors.white)
 end
@@ -934,14 +903,14 @@ local function drawPage1Mode()
     monitor.write("Mode: ")
     if not liveDataValid then
         monitor.setTextColor(colors.red)
-        monitor.write("SENSOR? ")
-    elseif liveEF >= 95.0 then
+        monitor.write("SENSOR No feedback ")
+    elseif monitorEF >= 95.0 then
         monitor.setTextColor(colors.cyan)
         monitor.write("IDLE ")
-    elseif liveIsRunning and liveEF > 0 then
+    elseif liveIsRunning and monitorEF > 0 then
         monitor.setTextColor(colors.green)
         monitor.write("RUN  ")
-    elseif hasEverRun and liveEF == 0 then
+    elseif hasEverRun and monitorEF == 0 then
         monitor.setTextColor(colors.red)
         monitor.write("CRASH")
     else
@@ -949,13 +918,13 @@ local function drawPage1Mode()
         monitor.write("STAND")
     end
     monitor.setTextColor(colors.white)
-    monitor.write(string.format(" | EF: %.2f%%", liveEF))
+    monitor.write(string.format(" | EF: %.2f%%", monitorEF))
 end
 
 local function drawPage1Temperature()
-    monitor.write(string.format("Case: %.1fM K | ER: ", liveCaseTemp / 1000000))
-    if liveER > 50 then monitor.setTextColor(colors.red) end
-    monitor.write(string.format("%.1f", liveER))
+    monitor.write(string.format("Case: %.1fM K | ER: ", monitorCaseTemp / 1000000))
+    if monitorER > 50 then monitor.setTextColor(colors.red) end
+    monitor.write(string.format("%.1f", monitorER))
     monitor.setTextColor(colors.white)
 end
 
@@ -969,7 +938,7 @@ end
 
 local function drawPage1Diagnostic()
     monitor.setTextColor(colors.cyan)
-    monitor.write("Diag: " .. string.sub(stuckReason, 1, math.max(1, monitorHeight > 30 and 35 or 28)))
+    monitor.write("Diag: " .. string.sub(stuckReason, 1, math.max(1, monitorWidth > 30 and 35 or 28)))
     monitor.setTextColor(colors.white)
 end
 
@@ -1016,7 +985,7 @@ end
 local function drawPage2Header()
     monitor.setBackgroundColor(colors.blue)
     monitor.setTextColor(colors.white)
-    monitor.write("=== REDSTONE INPUT LOG (2/2) ===")
+    monitor.write(string.format("=== REDSTONE INPUT LOG %dx%d (2/2) ===", monitorWidth, monitorHeight))
     monitor.setBackgroundColor(colors.black)
     monitor.setTextColor(colors.white)
 end
@@ -1070,7 +1039,7 @@ end
 local function drawPage2Footer()
     monitor.setBackgroundColor(colors.gray)
     monitor.setTextColor(colors.yellow)
-    monitor.write("[ Klick für Seite 1: Haupt-UI ]")
+    monitor.write("[ Click for Page 2: Main-UI ]")
     monitor.setBackgroundColor(colors.black)
     monitor.setTextColor(colors.white)
 end
@@ -1086,16 +1055,27 @@ local function uiLoop()
             end
 
             if currentPage == 1 then
+                local now = os.clock()
+                if lastCaseTempMonitorUpdate == nil or now - lastCaseTempMonitorUpdate >= 5.0 then
+                    monitorCaseTemp = liveCaseTemp
+                    lastCaseTempMonitorUpdate = now
+                end
+                if lastEffErMonitorUpdate == nil or now - lastEffErMonitorUpdate >= 1.0 then
+                    monitorEF = liveEF
+                    monitorER = liveER
+                    lastEffErMonitorUpdate = now
+                end
+
                 renderCachedLine(1, drawPage1Header, nil, SCRIPT_VERSION)
                 renderCachedLine(2, drawPage1Mode, nil,
-                    liveDataValid, liveEF, liveIsRunning, hasEverRun)
-                renderCachedLine(3, drawPage1Temperature, nil, liveCaseTemp, liveER)
+                    liveDataValid, monitorEF, liveIsRunning, hasEverRun)
+                renderCachedLine(3, drawPage1Temperature, nil, monitorCaseTemp, monitorER)
                 renderCachedLine(4, drawPage1Step, nil, lastAppliedStepText or false, lastActionMode)
                 renderCachedLine(5, drawPage1Diagnostic, nil, stuckReason, monitorHeight)
                 renderCachedLine(6, drawPage1Sensor, nil, lowPerfMultiplier)
                 renderCachedLine(7, drawPage1LogTitle, nil, ENABLE_MONITOR_LOGS)
 
-                local maxLogLines = math.max(1, monitorHeight - 9)
+                local maxLogLines = monitorHeight - 8
                 for i = 1, maxLogLines do
                     renderCachedLine(7 + i, drawPage1LogRow, i,
                         ENABLE_MONITOR_LOGS, logHistory[i] or false)
@@ -1110,7 +1090,7 @@ local function uiLoop()
                     lastDesiredMultiplier, lowPerfMultiplier)
                 renderCachedLine(5, drawPage2LogTitle, nil, ENABLE_MONITOR_LOGS)
 
-                local maxPulseLines = math.max(1, math.min(monitorHeight - 7, 18))
+                local maxPulseLines = monitorHeight - 6
                 for i = 1, maxPulseLines do
                     renderCachedLine(5 + i, drawPage2LogRow, i,
                         ENABLE_MONITOR_LOGS, pulseLogHistory[i] or false)
@@ -1120,7 +1100,6 @@ local function uiLoop()
             end
             fullRedraw = false
         else
-            -- Force a clean redraw if the monitor is disconnected and later returns.
             if lastRenderedPage ~= nil then
                 lastRenderedPage = nil
                 renderedLines = {}
